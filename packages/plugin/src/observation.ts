@@ -91,6 +91,25 @@ export type EnvironmentMaterialObservation = {
   }
 }
 
+export type McpLifecycleObservation = {
+  readonly type: "mcp.lifecycle"
+  readonly phase: "attached" | "detached"
+  readonly sessionID: string
+  readonly messageID: string
+  readonly assistantMessageID: string
+  readonly serverID: string
+  /** Whether this server contributes instructions or tools to this provider request. */
+  readonly included: boolean
+  readonly instructions?: string
+  /** Exact provider-visible MCP tool identities and input schemas. */
+  readonly tools: readonly {
+    readonly name: string
+    readonly providerName: string
+    readonly description?: string
+    readonly inputSchema: unknown
+  }[]
+}
+
 export type CompactionObservation = {
   readonly type: "session.compaction"
   readonly phase: "started" | "completed" | "failed"
@@ -122,5 +141,6 @@ export type Observation =
   | ProviderRequestObservation
   | ProviderResponseObservation
   | EnvironmentMaterialObservation
+  | McpLifecycleObservation
   | CompactionObservation
   | SubagentObservation

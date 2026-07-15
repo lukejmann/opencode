@@ -153,6 +153,17 @@ export interface ServerInstructions {
   tools: string[]
 }
 
+export interface ServerObservation {
+  readonly serverID: string
+  readonly instructions?: string
+  readonly tools: readonly {
+    readonly name: string
+    readonly providerName: string
+    readonly description?: string
+    readonly inputSchema: unknown
+  }[]
+}
+
 /** An MCP tool in its native shape; consumers adapt it to their own tool format. */
 export interface McpTool {
   /** Shared cached definition; consumers must copy rather than mutate it. */
@@ -165,6 +176,7 @@ export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
   readonly instructions: () => Effect.Effect<ServerInstructions[]>
+  readonly snapshot?: () => Effect.Effect<ServerObservation[]>
   readonly tools: () => Effect.Effect<Record<string, McpTool>>
   readonly prompts: () => Effect.Effect<Record<string, PromptInfo & { client: string }>>
   readonly resources: (clientName?: string) => Effect.Effect<Record<string, ResourceInfo & { client: string }>>
@@ -624,6 +636,25 @@ const layer = Layer.effect(
         }))
     })
 
+    const snapshot = Effect.fn("MCP.snapshot")(function* () {
+      const s = yield* InstanceState.get(state)
+      return Object.keys(s.clients)
+        .filter((name) => s.status[name]?.status === "connected")
+        .sort((a, b) => a.localeCompare(b))
+        .map((serverID) => ({
+          serverID,
+          ...(s.instructions[serverID] ? { instructions: s.instructions[serverID] } : {}),
+          tools: (s.defs[serverID] ?? [])
+            .toSorted((a, b) => a.name.localeCompare(b.name))
+            .map((tool) => ({
+              name: tool.name,
+              providerName: McpCatalog.toolName(serverID, tool.name),
+              ...(tool.description ? { description: tool.description } : {}),
+              inputSchema: structuredClone(tool.inputSchema),
+            })),
+        }))
+    })
+
     const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
       const s = yield* InstanceState.get(state)
       const result = yield* create(name, mcp)
@@ -973,6 +1004,7 @@ const layer = Layer.effect(
       status,
       clients,
       instructions,
+      snapshot,
       tools,
       prompts,
       resources,

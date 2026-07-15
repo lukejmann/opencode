@@ -11,6 +11,7 @@ export const AgentEngineCapability = {
     "provider.request",
     "provider.response",
     "environment.material",
+    "mcp.lifecycle",
     "session.compaction",
     "session.subagent",
   ],

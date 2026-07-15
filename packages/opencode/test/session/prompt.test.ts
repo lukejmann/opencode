@@ -5,7 +5,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { expect } from "bun:test"
+import { expect, test } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -135,6 +135,73 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
     }),
   )
 }
+
+test("MCP lifecycle observations preserve attach, schema refresh, and detach", () => {
+  const context = {
+    sessionID: "session-mcp-lifecycle",
+    messageID: "message-user",
+    assistantMessageID: "message-assistant",
+  }
+  const initial: MCP.ServerObservation = {
+    serverID: "source-inspection",
+    instructions: "Inspect before editing.",
+    tools: [{ name: "read", providerName: "source-inspection_read", inputSchema: { type: "object" } }],
+  }
+  const visible = SessionPrompt.providerMcpServers(
+    [initial],
+    new Set(["source-inspection_read"]),
+    new Set(["source-inspection_read"]),
+  )[0]!
+  const attached = SessionPrompt.mcpLifecycleChanges(new Map(), [visible], context)
+  expect(attached.observations).toEqual([{ type: "mcp.lifecycle", phase: "attached", ...context, ...visible }])
+
+  const changed: MCP.ServerObservation = {
+    ...initial,
+    tools: [
+      { name: "read", providerName: "source-inspection_read", inputSchema: { type: "object" } },
+      { name: "search", providerName: "source-inspection_search", inputSchema: { type: "object" } },
+    ],
+  }
+  const refreshedVisible = SessionPrompt.providerMcpServers(
+    [changed],
+    new Set(["source-inspection_read", "source-inspection_search"]),
+    new Set(["source-inspection_read", "source-inspection_search"]),
+  )[0]!
+  const refreshed = SessionPrompt.mcpLifecycleChanges(attached.next, [refreshedVisible], context)
+  expect(refreshed.observations[0]).toMatchObject({ phase: "attached", serverID: "source-inspection" })
+
+  const detached = SessionPrompt.mcpLifecycleChanges(refreshed.next, [], context)
+  expect(detached.observations).toEqual([{ type: "mcp.lifecycle", phase: "detached", ...context, ...refreshedVisible }])
+
+  const hidden = SessionPrompt.providerMcpServers([initial], new Set(), new Set())
+  expect(hidden).toEqual([{ serverID: "source-inspection", included: false, tools: [] }])
+})
+
+test("config, model, and agent snapshots emit only on first bind or actual change", () => {
+  const first = SessionPrompt.materialChanged(undefined, { model: "provider/model-a" })
+  expect(first.changed).toBe(true)
+  const unchanged = SessionPrompt.materialChanged(first.current, { model: "provider/model-a" })
+  expect(unchanged.changed).toBe(false)
+  const switched = SessionPrompt.materialChanged(unchanged.current, { model: "provider/model-b" })
+  expect(switched.changed).toBe(true)
+  expect(
+    SessionPrompt.configLayerID({
+      order: 2,
+      scope: "local",
+      source: { type: "workspace", path: ".opencode/opencode.json" },
+    }),
+  ).toBe("configuration:layer:0002:local:workspace:.opencode/opencode.json")
+})
+
+test("observation session state is one bounded LRU and eviction causes a full rebind", () => {
+  const cache = new SessionPrompt.ObservationSessionCache(2)
+  cache.session("one").model = "bound-model"
+  cache.session("two")
+  cache.session("three")
+  expect(cache.size).toBe(2)
+  expect(cache.session("one").model).toBeUndefined()
+  expect(cache.size).toBe(2)
+})
 
 const lsp = Layer.succeed(
   LSP.Service,

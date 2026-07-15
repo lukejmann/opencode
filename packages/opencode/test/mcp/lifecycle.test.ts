@@ -247,8 +247,34 @@ it.instance("instructions() returns non-empty connected server instructions with
     expect(yield* mcp.instructions()).toEqual([
       { name: "guide-server", instructions: "Use lookup before mutate.", tools: ["guide-server_test_tool"] },
     ])
+    expect(yield* mcp.snapshot!()).toEqual([
+      {
+        serverID: "blank-server",
+        tools: [
+          {
+            name: "test_tool",
+            providerName: "blank-server_test_tool",
+            description: "A test tool",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      {
+        serverID: "guide-server",
+        instructions: "Use lookup before mutate.",
+        tools: [
+          {
+            name: "test_tool",
+            providerName: "guide-server_test_tool",
+            description: "A test tool",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+    ])
     yield* mcp.disconnect("guide-server")
     expect(yield* mcp.instructions()).toEqual([])
+    expect((yield* mcp.snapshot!()).map((item) => item.serverID)).toEqual(["blank-server"])
   }),
 )
 

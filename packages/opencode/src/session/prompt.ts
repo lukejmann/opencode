@@ -57,6 +57,7 @@ import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 import { Observation } from "@/plugin/observation"
+import type { McpLifecycleObservation } from "@opencode-ai/plugin"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -98,6 +99,103 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   // cleanup() marks abandoned tool_use blocks this way after retries/aborts.
   // They are not pending work and must not trigger an assistant-prefill request.
   return part.state.status === "error" && part.state.metadata?.interrupted === true
+}
+
+export function mcpLifecycleChanges(
+  previous: ReadonlyMap<string, ProviderMcpServer>,
+  current: readonly ProviderMcpServer[],
+  context: Pick<McpLifecycleObservation, "sessionID" | "messageID" | "assistantMessageID">,
+) {
+  const next = new Map(current.map((server) => [server.serverID, structuredClone(server)]))
+  const observations: McpLifecycleObservation[] = []
+  for (const server of current) {
+    const prior = previous.get(server.serverID)
+    if (prior && JSON.stringify(prior) === JSON.stringify(server)) continue
+    observations.push({ type: "mcp.lifecycle", phase: "attached", ...context, ...structuredClone(server) })
+  }
+  for (const [serverID, server] of previous) {
+    if (next.has(serverID)) continue
+    observations.push({ type: "mcp.lifecycle", phase: "detached", ...context, ...structuredClone(server) })
+  }
+  return { next, observations }
+}
+
+export type ProviderMcpServer = Pick<McpLifecycleObservation, "serverID" | "included" | "instructions" | "tools">
+
+/** Project connected MCP state onto exactly what this provider request can see. */
+export function providerMcpServers(
+  servers: readonly MCP.ServerObservation[],
+  actualToolNames: ReadonlySet<string>,
+  permissionToolNames: ReadonlySet<string>,
+): ProviderMcpServer[] {
+  return servers.map((server) => {
+    const tools = server.tools.filter((tool) => actualToolNames.has(tool.providerName))
+    const instructionsIncluded =
+      !!server.instructions &&
+      (server.tools.length === 0 || server.tools.some((tool) => permissionToolNames.has(tool.providerName)))
+    return {
+      serverID: server.serverID,
+      included: tools.length > 0 || instructionsIncluded,
+      ...(instructionsIncluded ? { instructions: server.instructions } : {}),
+      tools,
+    }
+  })
+}
+
+export function configLayerID(layer: Config.ConfigProvenanceLayer): string {
+  const source =
+    layer.source.type === "workspace"
+      ? layer.source.path
+      : layer.source.type === "external"
+        ? layer.source.name
+        : layer.source.type === "generated"
+          ? layer.source.name
+          : "remote-config"
+  return `configuration:layer:${layer.order.toString().padStart(4, "0")}:${layer.scope}:${layer.source.type}:${source}`
+}
+
+export function materialChanged(previous: string | undefined, value: unknown) {
+  const current = JSON.stringify(value)
+  return { changed: current !== previous, current }
+}
+
+export interface ObservationSessionState {
+  mcp: Map<string, ProviderMcpServer>
+  config?: string
+  model?: string
+  agent?: string
+}
+
+/**
+ * One shared LRU bounds observation state for long-lived multi-project
+ * servers. A session revisited after eviction emits an explicit full rebind.
+ */
+export class ObservationSessionCache {
+  private readonly entries = new Map<string, ObservationSessionState>()
+
+  constructor(private readonly capacity = 1_024) {
+    if (!Number.isInteger(capacity) || capacity < 1) throw new Error("observation cache capacity must be positive")
+  }
+
+  session(id: string): ObservationSessionState {
+    const existing = this.entries.get(id)
+    if (existing) {
+      this.entries.delete(id)
+      this.entries.set(id, existing)
+      return existing
+    }
+    if (this.entries.size >= this.capacity) {
+      const oldest = this.entries.keys().next().value
+      if (oldest) this.entries.delete(oldest)
+    }
+    const created: ObservationSessionState = { mcp: new Map() }
+    this.entries.set(id, created)
+    return created
+  }
+
+  get size(): number {
+    return this.entries.size
+  }
 }
 
 export interface Interface {
@@ -142,6 +240,7 @@ const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
     const { db } = database
+    const observed = new ObservationSessionCache()
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
@@ -1268,53 +1367,50 @@ const layer = Layer.effect(
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),
             ]
-            const cfg = yield* config.get()
+            const [cfg, configLayers, mcpServers] = yield* Effect.all([
+              config.get(),
+              config.provenance ? config.provenance() : Effect.succeed([]),
+              mcp.snapshot ? mcp.snapshot() : Effect.succeed([]),
+            ])
+            const mcpToolNames = mcpServers.flatMap((server) => server.tools.map((tool) => tool.providerName))
+            const disabledMcpTools = Permission.disabled(
+              mcpToolNames,
+              Permission.merge(agent.permission, session.permission ?? []),
+            )
+            const permissionToolNames = new Set(mcpToolNames.filter((name) => !disabledMcpTools.has(name)))
+            const actualToolNames = new Set(
+              Object.keys(tools).filter((name) => lastUser.tools?.[name] !== false && !disabledMcpTools.has(name)),
+            )
+            const providerMcp = providerMcpServers(mcpServers, actualToolNames, permissionToolNames)
+            const observedSession = observed.session(sessionID)
+            const mcpLifecycle = mcpLifecycleChanges(observedSession.mcp, providerMcp, {
+              sessionID,
+              messageID: lastUser.id,
+              assistantMessageID: msg.id,
+            })
+            observedSession.mcp = mcpLifecycle.next
+            const effectiveConfig = Observation.safeConfig(cfg)
+            const configChange = materialChanged(observedSession.config, {
+              layers: configLayers,
+              effective: effectiveConfig,
+            })
+            observedSession.config = configChange.current
+            const modelContent = {
+              providerID: model.providerID,
+              modelID: model.id,
+              apiModelID: model.api.id,
+            }
+            const modelChange = materialChanged(observedSession.model, modelContent)
+            observedSession.model = modelChange.current
+            const agentContent = {
+              name: agent.name,
+              mode: agent.mode,
+              ...(agent.prompt ? { prompt: agent.prompt } : {}),
+            }
+            const agentChange = materialChanged(observedSession.agent, agentContent)
+            observedSession.agent = agentChange.current
             const environment = [
-              {
-                type: "environment.material" as const,
-                sessionID,
-                messageID: lastUser.id,
-                assistantMessageID: msg.id,
-                material: {
-                  kind: "configuration" as const,
-                  id: "configuration:effective",
-                  source: { type: "generated" as const, name: "effective-config" },
-                  content: Observation.safeConfig(cfg),
-                },
-              },
-              {
-                type: "environment.material" as const,
-                sessionID,
-                messageID: lastUser.id,
-                assistantMessageID: msg.id,
-                material: {
-                  kind: "model" as const,
-                  id: `model:${model.providerID}/${model.id}`,
-                  source: { type: "generated" as const, name: "selected-model" },
-                  content: {
-                    providerID: model.providerID,
-                    modelID: model.id,
-                    apiModelID: model.api.id,
-                  },
-                },
-              },
-              {
-                type: "environment.material" as const,
-                sessionID,
-                messageID: lastUser.id,
-                assistantMessageID: msg.id,
-                material: {
-                  kind: "agent" as const,
-                  id: `agent:${agent.name}`,
-                  source: { type: "generated" as const, name: "selected-agent" },
-                  content: {
-                    name: agent.name,
-                    mode: agent.mode,
-                    ...(agent.prompt ? { prompt: agent.prompt } : {}),
-                  },
-                },
-              },
-              ...(mcpInstructions
+              ...(configChange.changed
                 ? [
                     {
                       type: "environment.material" as const,
@@ -1322,15 +1418,27 @@ const layer = Layer.effect(
                       messageID: lastUser.id,
                       assistantMessageID: msg.id,
                       material: {
-                        kind: "mcp" as const,
-                        id: "mcp:instructions",
-                        source: { type: "generated" as const, name: "mcp-instructions" },
-                        content: mcpInstructions,
+                        kind: "configuration" as const,
+                        id: "configuration:effective",
+                        source: { type: "generated" as const, name: "effective-config" },
+                        content: effectiveConfig,
                       },
                     },
+                    ...configLayers.map((layer) => ({
+                      type: "environment.material" as const,
+                      sessionID,
+                      messageID: lastUser.id,
+                      assistantMessageID: msg.id,
+                      material: {
+                        kind: "configuration" as const,
+                        id: configLayerID(layer),
+                        source: layer.source,
+                        content: layer,
+                      },
+                    })),
                   ]
                 : []),
-              ...(skills
+              ...(modelChange.changed
                 ? [
                     {
                       type: "environment.material" as const,
@@ -1338,14 +1446,31 @@ const layer = Layer.effect(
                       messageID: lastUser.id,
                       assistantMessageID: msg.id,
                       material: {
-                        kind: "skill" as const,
-                        id: "skill:catalog",
-                        source: { type: "generated" as const, name: "skill-catalog" },
-                        content: skills,
+                        kind: "model" as const,
+                        id: `model:${model.providerID}/${model.id}`,
+                        source: { type: "generated" as const, name: "selected-model" },
+                        content: modelContent,
                       },
                     },
                   ]
                 : []),
+              ...(agentChange.changed
+                ? [
+                    {
+                      type: "environment.material" as const,
+                      sessionID,
+                      messageID: lastUser.id,
+                      assistantMessageID: msg.id,
+                      material: {
+                        kind: "agent" as const,
+                        id: `agent:${agent.name}`,
+                        source: { type: "generated" as const, name: "selected-agent" },
+                        content: agentContent,
+                      },
+                    },
+                  ]
+                : []),
+              ...mcpLifecycle.observations,
             ]
             yield* Effect.forEach(environment, (item) => Plugin.observe(plugin, item), {
               discard: true,

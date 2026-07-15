@@ -46,6 +46,26 @@ const unexpectedHttp = HttpClient.make((request) =>
   Effect.die(`unexpected http request: ${request.method} ${request.url}`),
 )
 
+test("config provenance sources preserve precedence identity without host or URL secrets", () => {
+  const context = { directory: "/workspace/project", worktree: "/workspace/project" }
+  expect(Config.configLayerSource("/workspace/project/.opencode/opencode.json", context)).toEqual({
+    type: "workspace",
+    path: ".opencode/opencode.json",
+  })
+  expect(Config.configLayerSource("/Users/private/.config/opencode/opencode.json", context)).toEqual({
+    type: "external",
+    name: "opencode.json",
+  })
+  expect(Config.configLayerSource("https://user:secret@example.com/config?token=secret#fragment", context)).toEqual({
+    type: "external",
+    name: "remote-config:example.com",
+  })
+  expect(Config.configLayerSource("OPENCODE_CONFIG_CONTENT", context)).toEqual({
+    type: "generated",
+    name: "launch-override",
+  })
+})
+
 const json = (request: Parameters<typeof HttpClientResponse.fromWeb>[0], body: unknown, status = 200) =>
   HttpClientResponse.fromWeb(
     request,

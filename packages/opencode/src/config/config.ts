@@ -114,8 +114,49 @@ type Info = ConfigV1.Info & {
   plugin_origins?: ConfigPlugin.Origin[]
 }
 
+export type ConfigLayerSource =
+  | { readonly type: "workspace"; readonly path: string }
+  | { readonly type: "external"; readonly name: string }
+  | { readonly type: "remote"; readonly url: string }
+  | { readonly type: "generated"; readonly name: string }
+
+export interface ConfigProvenanceLayer {
+  readonly order: number
+  readonly scope: "global" | "local"
+  readonly source: ConfigLayerSource
+}
+
+/** Produce a stable source identity without leaking host paths or URL secrets. */
+export function configLayerSource(
+  source: string,
+  ctx: Pick<InstanceContext, "directory" | "worktree">,
+): ConfigLayerSource {
+  if (source === "OPENCODE_CONFIG_CONTENT") return { type: "generated", name: "launch-override" }
+  if (source.startsWith("http://") || source.startsWith("https://")) {
+    try {
+      const url = new URL(source)
+      url.username = ""
+      url.password = ""
+      url.search = ""
+      url.hash = ""
+      return { type: "external", name: `remote-config:${url.hostname.toLowerCase()}` }
+    } catch {
+      return { type: "external", name: "remote-config" }
+    }
+  }
+  for (const root of [ctx.worktree, ctx.directory]) {
+    const relative = path.relative(path.resolve(root), path.resolve(source))
+    if (relative === "") return { type: "workspace", path: "." }
+    if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+      return { type: "workspace", path: relative.split(path.sep).join("/") }
+    }
+  }
+  return { type: "external", name: path.basename(source) || "config" }
+}
+
 type State = {
   config: Info
+  provenance: ConfigProvenanceLayer[]
   directories: string[]
   deps: Fiber.Fiber<void>[]
   consoleState: ConsoleState
@@ -123,6 +164,7 @@ type State = {
 
 export interface Interface {
   readonly get: () => Effect.Effect<Info>
+  readonly provenance?: () => Effect.Effect<ConfigProvenanceLayer[]>
   readonly getGlobal: () => Effect.Effect<Info>
   readonly getConsoleState: () => Effect.Effect<ConsoleState>
   readonly update: (config: Info) => Effect.Effect<void>
@@ -316,6 +358,7 @@ const layer = Layer.effect(
         const auth = yield* authSvc.all().pipe(Effect.orDie)
 
         let result: Info = {}
+        const provenance: ConfigProvenanceLayer[] = []
         const authEnv: Record<string, string> = {}
         const consoleManagedProviders = new Set<string>()
         let activeOrgName: string | undefined
@@ -349,6 +392,8 @@ const layer = Layer.effect(
         })
 
         const merge = (source: string, next: Info, kind?: ConfigPlugin.Scope) => {
+          const scope = kind ?? (containsPath(source, ctx) || source === "OPENCODE_CONFIG_CONTENT" ? "local" : "global")
+          provenance.push({ order: provenance.length, scope, source: configLayerSource(source, ctx) })
           result = mergeConfigConcatArrays(result, next)
           return mergePluginOrigins(source, next.plugin, kind)
         }
@@ -524,12 +569,13 @@ const layer = Layer.effect(
         // macOS managed preferences (.mobileconfig deployed via MDM) override everything
         const managed = yield* Effect.promise(() => ConfigManaged.readManagedPreferences())
         if (managed) {
-          result = mergeConfigConcatArrays(
-            result,
+          yield* merge(
+            managed.source,
             yield* loadConfig(managed.text, {
               dir: path.dirname(managed.source),
               source: managed.source,
             }),
+            "global",
           )
         }
 
@@ -585,6 +631,7 @@ const layer = Layer.effect(
 
         return {
           config: result,
+          provenance,
           directories,
           deps,
           consoleState: {
@@ -605,6 +652,10 @@ const layer = Layer.effect(
 
     const get = Effect.fn("Config.get")(function* () {
       return yield* InstanceState.use(state, (s) => s.config)
+    })
+
+    const provenance = Effect.fn("Config.provenance")(function* () {
+      return yield* InstanceState.use(state, (s) => structuredClone(s.provenance))
     })
 
     const directories = Effect.fn("Config.directories")(function* () {
@@ -661,6 +712,7 @@ const layer = Layer.effect(
 
     return Service.of({
       get,
+      provenance,
       getGlobal,
       getConsoleState,
       update,
