@@ -29,8 +29,16 @@ import { DbCommand } from "./cli/cmd/db"
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
+import { AgentEngineCapability } from "./agent-engine-capability"
 
 const args = hideBin(process.argv)
+
+// Kept outside yargs so an older/stock build fails this probe instead of
+// accidentally accepting a similarly named command or config option.
+if (args.length === 1 && args[0] === "--agent-engine-capabilities") {
+  process.stdout.write(`${JSON.stringify(AgentEngineCapability)}\n`)
+  process.exit(0)
+}
 
 function show(out: string) {
   const text = out.trimStart()

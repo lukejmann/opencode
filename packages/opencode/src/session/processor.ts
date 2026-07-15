@@ -594,6 +594,26 @@ const layer = Layer.effect(
         ctx.toolcalls = {}
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
+        const finalParts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+          Effect.provideService(Database.Service, database),
+        )
+        yield* Plugin.observe(plugin, {
+          type: "provider.response",
+          sessionID: ctx.assistantMessage.sessionID,
+          messageID: ctx.assistantMessage.id,
+          parentMessageID: ctx.assistantMessage.parentID,
+          providerID: ctx.assistantMessage.providerID,
+          modelID: ctx.assistantMessage.modelID,
+          status: ctx.assistantMessage.error ? (aborted ? "cancelled" : "error") : "ok",
+          parts: finalParts,
+          usage: {
+            input: ctx.assistantMessage.tokens.input,
+            output: ctx.assistantMessage.tokens.output,
+            reasoning: ctx.assistantMessage.tokens.reasoning,
+            cacheRead: ctx.assistantMessage.tokens.cache.read,
+            cacheWrite: ctx.assistantMessage.tokens.cache.write,
+          },
+        })
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
@@ -637,7 +657,7 @@ const layer = Layer.effect(
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream(streamInput)
+            const stream = llm.stream({ ...streamInput, assistantMessageID: input.assistantMessage.id })
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),

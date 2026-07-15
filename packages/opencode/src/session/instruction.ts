@@ -13,6 +13,8 @@ import { withTransientReadRetry } from "@/util/effect-http-client"
 import { Global } from "@opencode-ai/core/global"
 import type { MessageV2 } from "./message-v2"
 import type { MessageID } from "./schema"
+import { Plugin } from "@/plugin"
+import { Observation } from "@/plugin/observation"
 
 function extract(messages: SessionV1.WithParts[]) {
   const paths = new Set<string>()
@@ -34,12 +36,17 @@ function extract(messages: SessionV1.WithParts[]) {
 export interface Interface {
   readonly clear: (messageID: MessageID) => Effect.Effect<void>
   readonly systemPaths: () => Effect.Effect<Set<string>, FSUtil.Error>
-  readonly system: () => Effect.Effect<string[], FSUtil.Error>
+  readonly system: (input?: {
+    sessionID: string
+    messageID: MessageID
+    assistantMessageID?: MessageID
+  }) => Effect.Effect<string[], FSUtil.Error>
   readonly find: (dir: string) => Effect.Effect<string | undefined, FSUtil.Error>
   readonly resolve: (
     messages: SessionV1.WithParts[],
     filepath: string,
     messageID: MessageID,
+    sessionID?: string,
   ) => Effect.Effect<{ filepath: string; content: string }[], FSUtil.Error>
 }
 
@@ -48,7 +55,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/In
 const layer: Layer.Layer<
   Service,
   never,
-  FSUtil.Service | Config.Service | Global.Service | HttpClient.HttpClient | RuntimeFlags.Service
+  FSUtil.Service | Config.Service | Global.Service | HttpClient.HttpClient | RuntimeFlags.Service | Plugin.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -56,6 +63,7 @@ const layer: Layer.Layer<
     const fs = yield* FSUtil.Service
     const global = yield* Global.Service
     const flags = yield* RuntimeFlags.Service
+    const plugin = yield* Plugin.Service
     const http = HttpClient.filterStatusOk(withTransientReadRetry(yield* HttpClient.HttpClient))
     const globalFiles = [
       path.join(global.config, "AGENTS.md"),
@@ -152,7 +160,45 @@ const layer: Layer.Layer<
       return paths
     })
 
-    const system = Effect.fn("Instruction.system")(function* () {
+    const observe = Effect.fnUntraced(function* (input: {
+      content: string
+      location: string
+      remote: boolean
+      sessionID?: string
+      messageID?: MessageID
+      assistantMessageID?: MessageID
+    }) {
+      const ctx = yield* InstanceState.context
+      const source = input.remote
+        ? Observation.remoteSource(input.location)
+        : Observation.source(input.location, ctx.worktree, ctx.directory)
+      const label =
+        source.type === "workspace"
+          ? source.path
+          : source.type === "external"
+            ? source.name
+            : source.type === "remote"
+              ? source.url
+              : source.name
+      yield* Plugin.observe(plugin, {
+        type: "environment.material",
+        sessionID: input.sessionID,
+        messageID: input.messageID,
+        assistantMessageID: input.assistantMessageID,
+        material: {
+          kind: "instruction",
+          id: `instruction:${label}`,
+          source,
+          content: input.content,
+        },
+      })
+    })
+
+    const system = Effect.fn("Instruction.system")(function* (input?: {
+      sessionID: string
+      messageID: MessageID
+      assistantMessageID?: MessageID
+    }) {
       const config = yield* cfg.get()
       const paths = yield* systemPaths()
       const urls = (config.instructions ?? []).filter(
@@ -161,6 +207,37 @@ const layer: Layer.Layer<
 
       const files = yield* Effect.forEach(Array.from(paths), read, { concurrency: 8 })
       const remote = yield* Effect.forEach(urls, fetch, { concurrency: 4 })
+
+      yield* Effect.forEach(
+        Array.from(paths),
+        (item, i) =>
+          files[i]
+            ? observe({
+                content: files[i],
+                location: item,
+                remote: false,
+                sessionID: input?.sessionID,
+                messageID: input?.messageID,
+                assistantMessageID: input?.assistantMessageID,
+              })
+            : Effect.void,
+        { discard: true, concurrency: 1 },
+      )
+      yield* Effect.forEach(
+        urls,
+        (item, i) =>
+          remote[i]
+            ? observe({
+                content: remote[i],
+                location: item,
+                remote: true,
+                sessionID: input?.sessionID,
+                messageID: input?.messageID,
+                assistantMessageID: input?.assistantMessageID,
+              })
+            : Effect.void,
+        { discard: true, concurrency: 1 },
+      )
 
       return [
         ...Array.from(paths).flatMap((item, i) => (files[i] ? [`Instructions from: ${item}\n${files[i]}`] : [])),
@@ -180,6 +257,7 @@ const layer: Layer.Layer<
       messages: SessionV1.WithParts[],
       filepath: string,
       messageID: MessageID,
+      sessionID?: string,
     ) {
       const sys = yield* systemPaths()
       const already = extract(messages)
@@ -211,6 +289,7 @@ const layer: Layer.Layer<
         set.add(found)
         const content = yield* read(found)
         if (content) {
+          yield* observe({ content, location: found, remote: false, sessionID, messageID })
           results.push({ filepath: found, content: `Instructions from: ${found}\n${content}` })
         }
 
@@ -231,7 +310,7 @@ export function loaded(messages: SessionV1.WithParts[]) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient],
+  deps: [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, Plugin.node, httpClient],
 })
 
 export * as Instruction from "./instruction"

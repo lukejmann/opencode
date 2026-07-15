@@ -23,7 +23,12 @@ export type RuntimeStatus =
   | { readonly type: "supported"; readonly apiKey: string; readonly baseURL?: string }
   | { readonly type: "unsupported"; readonly reason: string }
 export type StreamResult =
-  | { readonly type: "supported"; readonly stream: Stream.Stream<LLMEvent, unknown> }
+  | {
+      readonly type: "supported"
+      readonly stream: Stream.Stream<LLMEvent, unknown>
+      /** Final ordered messages after the native provider transform. */
+      readonly messages: readonly ModelMessage[]
+    }
   | { readonly type: "unsupported"; readonly reason: string }
 
 type StreamInput = {
@@ -87,11 +92,12 @@ export function stream(input: StreamInput): StreamResult {
   // — if a field ever needs to differ between the two surfaces, the
   // translation belongs here, not split across both packages.
   const tools = nativeTools(input.tools, input)
+  const messages = ProviderTransform.message(input.messages, input.model, input.providerOptions ?? {})
   const request = LLMNative.request({
     model: input.model,
     apiKey: current.apiKey,
     baseURL: current.baseURL,
-    messages: ProviderTransform.message(input.messages, input.model, input.providerOptions ?? {}),
+    messages,
     toolChoice: input.toolChoice,
     temperature: input.temperature,
     topP: input.topP,
@@ -142,6 +148,7 @@ export function stream(input: StreamInput): StreamResult {
   return {
     ...current,
     stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
+    messages,
   }
 }
 

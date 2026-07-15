@@ -29,12 +29,14 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { Observation } from "@/plugin/observation"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
 export type StreamInput = {
   user: SessionV1.User
   sessionID: string
+  assistantMessageID?: string
   parentSessionID?: string
   model: Provider.Model
   agent: Agent.Info
@@ -241,6 +243,23 @@ const live: Layer.Layer<
           abort: input.abort,
         })
         if (native.type === "supported") {
+          yield* Plugin.observe(
+            plugin,
+            Observation.providerRequest({
+              sessionID: input.sessionID,
+              messageID: input.user.id,
+              assistantMessageID: input.assistantMessageID,
+              parentSessionID: input.parentSessionID,
+              runtime: "native",
+              providerID: input.model.providerID,
+              modelID: input.model.id,
+              system: prepared.system,
+              messages: native.messages,
+              tools: prepared.tools,
+              toolChoice: input.toolChoice,
+              parameters: prepared.params,
+            }),
+          )
           yield* Effect.logInfo("llm runtime selected", {
             "llm.runtime": "native",
             "llm.provider": input.model.providerID,
@@ -329,11 +348,31 @@ const live: Layer.Layer<
                 specificationVersion: "v3" as const,
                 async transformParams(args) {
                   if (args.type === "stream") {
-                    // @ts-expect-error
-                    args.params.prompt = ProviderTransform.message(
+                    const messages = ProviderTransform.message(
                       args.params.prompt,
                       input.model,
                       prepared.messageTransformOptions,
+                    )
+                    // @ts-expect-error
+                    args.params.prompt = messages
+                    await bridge.promise(
+                      Plugin.observe(
+                        plugin,
+                        Observation.providerRequest({
+                          sessionID: input.sessionID,
+                          messageID: input.user.id,
+                          assistantMessageID: input.assistantMessageID,
+                          parentSessionID: input.parentSessionID,
+                          runtime: "ai-sdk",
+                          providerID: input.model.providerID,
+                          modelID: input.model.id,
+                          system: prepared.system,
+                          messages,
+                          tools: prepared.tools,
+                          toolChoice: input.toolChoice,
+                          parameters: prepared.params,
+                        }),
+                      ),
                     )
                   }
                   return args.params

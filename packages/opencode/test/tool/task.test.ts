@@ -24,6 +24,8 @@ import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { Plugin } from "@/plugin"
+import type { Observation } from "@opencode-ai/plugin"
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -48,6 +50,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       SessionStatus.node,
       Truncate.node,
       ToolRegistry.node,
+      Plugin.node,
       Database.node,
       RuntimeFlags.node,
       Ripgrep.node,
@@ -139,6 +142,63 @@ function reply(input: SessionPrompt.PromptInput, text: string): SessionV1.WithPa
 }
 
 describe("tool.task", () => {
+  it.instance("observes subagent spawn and completion with inherited lineage", () =>
+    Effect.gen(function* () {
+      const received: Observation[] = []
+      const plugin = Plugin.Service.of({
+        trigger: <Name extends string, Input, Output>(_name: Name, _input: Input, output: Output) =>
+          Effect.succeed(output),
+        list: () =>
+          Effect.succeed([
+            {
+              "experimental.observation": async (input: Observation) => {
+                received.push(input)
+              },
+            },
+          ]),
+        init: () => Effect.void,
+      })
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool.pipe(Effect.provideService(Plugin.Service, plugin))
+      const def = yield* tool.init()
+      let prompt: SessionPrompt.PromptInput | undefined
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          callID: "call-task-1",
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ onPrompt: (input) => (prompt = input) }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      const lineage = received.filter((item) => item.type === "session.subagent")
+      expect(lineage.map((item) => item.phase)).toEqual(["started", "completed"])
+      expect(lineage[0]).toMatchObject({
+        action: "spawn",
+        parentSessionID: chat.id,
+        childSessionID: result.metadata.sessionId,
+        parentMessageID: assistant.id,
+        toolCallID: "call-task-1",
+        agent: "general",
+        background: false,
+      })
+      if (!prompt?.messageID) throw new Error("task prompt was not captured")
+      expect(lineage[0]?.childPromptMessageID).toBe(prompt.messageID)
+      expect(lineage[1]?.childResultMessageID).toBeDefined()
+    }),
+  )
+
   it.instance(
     "description sorts subagents by name and is stable across calls",
     () =>

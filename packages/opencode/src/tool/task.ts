@@ -10,10 +10,11 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
-import { Effect, Exit, Schema, Scope } from "effect"
+import { Cause, Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { Plugin } from "@/plugin"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -88,6 +89,7 @@ export const TaskTool = Tool.define(
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const plugin = yield* Plugin.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -184,19 +186,49 @@ export const TaskTool = Tool.define(
       if (!ops) return yield* Effect.fail(new Error("TaskTool requires promptOps in ctx.extra"))
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
-        const parts = yield* ops.resolvePromptParts(params.prompt)
-        const result = yield* ops.prompt({
-          messageID: MessageID.ascending(),
-          sessionID: nextSession.id,
-          model: {
-            modelID: model.modelID,
-            providerID: model.providerID,
-          },
-          variant: next.model ? undefined : variant,
+        const childPromptMessageID = MessageID.ascending()
+        const observation = {
+          type: "session.subagent" as const,
+          action: session ? ("resume" as const) : ("spawn" as const),
+          parentSessionID: ctx.sessionID,
+          childSessionID: nextSession.id,
+          parentMessageID: ctx.messageID,
+          childPromptMessageID,
+          toolCallID: ctx.callID,
           agent: next.name,
-          parts,
+          background: runInBackground,
+        }
+        yield* Plugin.observe(plugin, { ...observation, phase: "started" })
+
+        const exit = yield* Effect.exit(
+          Effect.gen(function* () {
+            const parts = yield* ops.resolvePromptParts(params.prompt)
+            return yield* ops.prompt({
+              messageID: childPromptMessageID,
+              sessionID: nextSession.id,
+              model: {
+                modelID: model.modelID,
+                providerID: model.providerID,
+              },
+              variant: next.model ? undefined : variant,
+              agent: next.name,
+              parts,
+            })
+          }),
+        )
+        if (Exit.isSuccess(exit)) {
+          yield* Plugin.observe(plugin, {
+            ...observation,
+            phase: "completed",
+            childResultMessageID: exit.value.info.id,
+          })
+          return exit.value.parts.findLast((item) => item.type === "text")?.text ?? ""
+        }
+        yield* Plugin.observe(plugin, {
+          ...observation,
+          phase: Cause.hasInterruptsOnly(exit.cause) ? "cancelled" : "failed",
         })
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        return yield* Effect.failCause(exit.cause)
       })
 
       const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (

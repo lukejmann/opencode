@@ -27,6 +27,8 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
+import { Plugin } from "@/plugin"
+import type { Observation } from "@opencode-ai/plugin"
 
 type ConfigModel = NonNullable<NonNullable<ConfigV1.Info["provider"]>[string]["models"]>[string]
 
@@ -77,12 +79,29 @@ function llmLayerWithExecutor(
   options: {
     executor?: Layer.Layer<RequestExecutor.Service>
     flags?: Partial<RuntimeFlags.Info>
+    plugin?: Layer.Layer<Plugin.Service>
   } = {},
 ) {
   return AppNodeBuilder.build(LLM.node, [
     [RuntimeFlags.node, RuntimeFlags.layer(options.flags)],
     ...(options.executor ? ([[LayerNodePlatform.requestExecutor, options.executor]] as const) : []),
+    ...(options.plugin ? ([[Plugin.node, options.plugin]] as const) : []),
   ])
+}
+
+function observationLayer(received: Observation[]) {
+  return Layer.mock(Plugin.Service)({
+    trigger: <Name extends string, Input, Output>(_name: Name, _input: Input, output: Output) => Effect.succeed(output),
+    list: () =>
+      Effect.succeed([
+        {
+          "experimental.observation": async (input: Observation) => {
+            received.push(input)
+          },
+        },
+      ]),
+    init: () => Effect.void,
+  })
 }
 
 describe("session.llm.hasToolCalls", () => {
@@ -754,6 +773,83 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
 describe("session.llm.stream", () => {
   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
   it.instance(
+    "observes the final AI SDK request without credentials or executable tools",
+    () =>
+      Effect.gen(function* () {
+        const fixture = loadFixture(vivgridFixture.providerID, vivgridFixture.modelID)
+        const request = waitRequest(
+          "/chat/completions",
+          new Response(createChatStream("Hello"), {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }),
+        )
+        const resolved = yield* Provider.use.getModel(
+          ProviderV2.ID.make(vivgridFixture.providerID),
+          ModelV2.ID.make(fixture.model.id),
+        )
+        const sessionID = SessionID.make("session-test-observation-ai-sdk")
+        const received: Observation[] = []
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        yield* drainWith(llmLayerWithExecutor({ plugin: observationLayer(received) }), {
+          user: {
+            id: MessageID.make("msg_user-observation-ai-sdk"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderV2.ID.make(vivgridFixture.providerID), modelID: resolved.id },
+          } satisfies SessionV1.User,
+          assistantMessageID: "msg_assistant-observation-ai-sdk",
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [{ role: "user", content: "Hello" }],
+          tools: {
+            lookup: tool({
+              description: "Lookup",
+              inputSchema: z.object({ query: z.string() }),
+              execute: async () => ({ output: "executor-secret" }),
+            }),
+          },
+        })
+
+        const capture = yield* Effect.promise(() => request)
+        expect(capture.headers.get("Authorization")).toBe("Bearer test-key")
+        const observed = received.find((item) => item.type === "provider.request")
+        expect(observed).toMatchObject({
+          runtime: "ai-sdk",
+          sessionID,
+          messageID: "msg_user-observation-ai-sdk",
+          assistantMessageID: "msg_assistant-observation-ai-sdk",
+          providerID: vivgridFixture.providerID,
+          tools: [{ name: "lookup", description: "Lookup" }],
+        })
+        expect(JSON.stringify(observed?.messages)).toContain("Hello")
+        expect(JSON.stringify(observed)).not.toContain("test-key")
+        expect(JSON.stringify(observed)).not.toContain("Authorization")
+        expect(JSON.stringify(observed)).not.toContain("executor-secret")
+      }),
+    {
+      config: () => ({
+        enabled_providers: [vivgridFixture.providerID],
+        provider: {
+          [vivgridFixture.providerID]: {
+            options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
     "sends temperature, tokens, and reasoning options for openai-compatible models",
     () =>
       Effect.gen(function* () {
@@ -1258,6 +1354,7 @@ describe("session.llm.stream", () => {
           },
         ]
         const request = waitRequest("/responses", createEventResponse(chunks, true))
+        const received: Observation[] = []
 
         const resolved = yield* Provider.use.getModel(ProviderV2.ID.openai, ModelV2.ID.make(model.id))
         const sessionID = SessionID.make("session-test-native")
@@ -1269,22 +1366,29 @@ describe("session.llm.stream", () => {
           temperature: 0.2,
         } satisfies Agent.Info
 
-        yield* drainWith(llmLayerWithExecutor({ flags: { experimentalNativeLlm: true } }), {
-          user: {
-            id: MessageID.make("msg_user-native"),
+        yield* drainWith(
+          llmLayerWithExecutor({
+            flags: { experimentalNativeLlm: true },
+            plugin: observationLayer(received),
+          }),
+          {
+            user: {
+              id: MessageID.make("msg_user-native"),
+              sessionID,
+              role: "user",
+              time: { created: Date.now() },
+              agent: agent.name,
+              model: { providerID: ProviderV2.ID.make("openai"), modelID: resolved.id, variant: "high" },
+            } satisfies SessionV1.User,
+            assistantMessageID: "msg_assistant-native",
             sessionID,
-            role: "user",
-            time: { created: Date.now() },
-            agent: agent.name,
-            model: { providerID: ProviderV2.ID.make("openai"), modelID: resolved.id, variant: "high" },
-          } satisfies SessionV1.User,
-          sessionID,
-          model: resolved,
-          agent,
-          system: ["You are a helpful assistant."],
-          messages: [{ role: "user", content: "Hello" }],
-          tools: {},
-        })
+            model: resolved,
+            agent,
+            system: ["You are a helpful assistant."],
+            messages: [{ role: "user", content: "Hello" }],
+            tools: {},
+          },
+        )
 
         const capture = yield* Effect.promise(() => request)
         expect(capture.url.pathname.endsWith("/responses")).toBe(true)
@@ -1295,6 +1399,15 @@ describe("session.llm.stream", () => {
         expect(capture.body.include).toEqual(["reasoning.encrypted_content"])
         expect(JSON.stringify(capture.body.input)).toContain("You are a helpful assistant.")
         expect(capture.body.input).toContainEqual({ role: "user", content: [{ type: "input_text", text: "Hello" }] })
+        expect(received.find((item) => item.type === "provider.request")).toMatchObject({
+          runtime: "native",
+          sessionID,
+          messageID: "msg_user-native",
+          assistantMessageID: "msg_assistant-native",
+          providerID: "openai",
+        })
+        expect(JSON.stringify(received)).not.toContain("test-openai-key")
+        expect(JSON.stringify(received)).not.toContain("Authorization")
       }),
     { config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`) },
   )

@@ -16,6 +16,8 @@ import type { BunShell } from "./shell.js"
 import { type ToolDefinition } from "./tool.js"
 
 export * from "./tool.js"
+export * from "./observation.js"
+import type { Observation } from "./observation.js"
 
 export type ProviderContext = {
   source: "env" | "config" | "custom" | "api"
@@ -228,6 +230,16 @@ export interface Hooks {
   }
   auth?: AuthHook
   provider?: ProviderHook
+  /**
+   * Observe an immutable snapshot at an OpenCode-owned runtime boundary.
+   *
+   * This hook is read-only and fail-soft: mutations never affect execution and
+   * thrown errors are isolated from the agent run. It intentionally excludes
+   * credentials, request headers, provider options, and absolute source
+   * metadata. Provider-visible message/material content is captured verbatim
+   * and can itself contain user-supplied sensitive text or paths.
+   */
+  "experimental.observation"?: (input: Observation) => Promise<void>
   /**
    * Called when a new message is received
    */

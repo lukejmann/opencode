@@ -33,6 +33,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import type { Observation } from "@opencode-ai/plugin"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -361,6 +362,21 @@ function autocontinue(enabled: boolean) {
       })
     },
     list: () => Effect.succeed([]),
+    init: () => Effect.void,
+  })
+}
+
+function observationPlugin(received: Observation[]) {
+  return Layer.mock(Plugin.Service)({
+    trigger: <Name extends string, Input, Output>(_name: Name, _input: Input, output: Output) => Effect.succeed(output),
+    list: () =>
+      Effect.succeed([
+        {
+          "experimental.observation": async (input: Observation) => {
+            received.push(input)
+          },
+        },
+      ]),
     init: () => Effect.void,
   })
 }
@@ -798,6 +814,42 @@ describe("session.compaction.prune", () => {
 })
 
 describe("session.compaction.process", () => {
+  itCompaction.instance(
+    "observes successful compaction lineage at the owning boundary",
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      const first = yield* createUserMessage(session.id, "first")
+      const source = yield* createAssistantMessage(session.id, first.id, test.directory)
+      const marker = yield* createUserMessage(session.id, "compact now")
+      const messages = yield* ssn.messages({ sessionID: session.id })
+      const received: Observation[] = []
+
+      const result = yield* SessionCompaction.use
+        .process({
+          parentID: marker.id,
+          messages,
+          sessionID: session.id,
+          auto: false,
+        })
+        .pipe(withCompaction({ plugin: observationPlugin(received) }))
+
+      expect(result).toBe("continue")
+      const compactions = received.filter((item) => item.type === "session.compaction")
+      expect(compactions.map((item) => item.phase)).toEqual(["started", "completed"])
+      expect(compactions[0]).toMatchObject({
+        sessionID: session.id,
+        compactionMessageID: marker.id,
+        sourceMessageID: source.id,
+        automatic: false,
+        overflow: false,
+      })
+      expect(compactions[0]?.summaryMessageID).toBe(compactions[1]?.summaryMessageID)
+      expect(compactions[0]?.inputMessageIDs).toContain(source.id)
+    }),
+  )
+
   it.instance(
     "throws when parent is not a user message",
     Effect.gen(function* () {

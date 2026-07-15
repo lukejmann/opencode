@@ -1,6 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import type {
   Hooks,
+  Observation as PluginObservation,
   PluginInput,
   Plugin as PluginInstance,
   PluginModule,
@@ -31,6 +32,7 @@ import type { WorkspaceAdapter } from "@/control-plane/types"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
+import { Observation } from "./observation"
 
 type State = {
   hooks: Hooks[]
@@ -54,6 +56,30 @@ export interface Interface {
   readonly list: () => Effect.Effect<Hooks[]>
   readonly init: () => Effect.Effect<void>
 }
+
+/**
+ * Dispatch a detached snapshot to every observer. Each hook receives its own
+ * clone, and clone/hook failures are logged then ignored so observation can
+ * never change or fail an agent run.
+ */
+export const observe = Effect.fn("Plugin.observe")(function* (
+  plugin: Pick<Interface, "list">,
+  input: PluginObservation,
+) {
+  const hooks = yield* plugin.list()
+  for (const hook of hooks) {
+    const fn = hook["experimental.observation"]
+    if (!fn) continue
+    yield* Effect.tryPromise({
+      try: () => Promise.resolve(fn(Observation.snapshot(input))),
+      catch: errorMessage,
+    }).pipe(
+      Effect.timeout("1 second"),
+      Effect.tapError((error) => Effect.logWarning("plugin observation hook failed", { type: input.type, error })),
+      Effect.ignore,
+    )
+  }
+})
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Plugin") {}
 

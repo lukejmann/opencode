@@ -380,6 +380,18 @@ const layer = Layer.effect(
         },
       }
       yield* session.updateMessage(msg)
+      const compactionObservation = {
+        type: "session.compaction" as const,
+        sessionID: input.sessionID,
+        compactionMessageID: input.parentID,
+        summaryMessageID: msg.id,
+        sourceMessageID: history.findLast((item) => item.info.role === "assistant")?.info.id,
+        inputMessageIDs: selected.head.map((item) => item.info.id),
+        retainedTailMessageID: selected.tail_start_id,
+        automatic: input.auto,
+        overflow: input.overflow === true,
+      }
+      yield* Plugin.observe(plugin, { ...compactionObservation, phase: "started" })
       const processor = yield* processors.create({
         assistantMessage: msg,
         sessionID: input.sessionID,
@@ -409,6 +421,7 @@ const layer = Layer.effect(
         }).toObject()
         processor.message.finish = "error"
         yield* session.updateMessage(processor.message)
+        yield* Plugin.observe(plugin, { ...compactionObservation, phase: "failed" })
         return "stop"
       }
 
@@ -503,7 +516,11 @@ const layer = Layer.effect(
         }
       }
 
-      if (processor.message.error) return "stop"
+      if (processor.message.error) {
+        yield* Plugin.observe(plugin, { ...compactionObservation, phase: "failed" })
+        return "stop"
+      }
+      yield* Plugin.observe(plugin, { ...compactionObservation, phase: "completed" })
       if (result === "continue") {
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }
