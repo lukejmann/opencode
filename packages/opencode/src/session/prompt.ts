@@ -56,7 +56,6 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
-import { Observation } from "@/plugin/observation"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1258,7 +1257,7 @@ const layer = Layer.effect(
             const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),
-              instruction.system({ sessionID, messageID: lastUser.id, assistantMessageID: msg.id }).pipe(Effect.orDie),
+              instruction.system().pipe(Effect.orDie),
               sys.mcp(agent, session.permission),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
@@ -1268,89 +1267,6 @@ const layer = Layer.effect(
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),
             ]
-            const cfg = yield* config.get()
-            const environment = [
-              {
-                type: "environment.material" as const,
-                sessionID,
-                messageID: lastUser.id,
-                assistantMessageID: msg.id,
-                material: {
-                  kind: "configuration" as const,
-                  id: "configuration:effective",
-                  source: { type: "generated" as const, name: "effective-config" },
-                  content: Observation.safeConfig(cfg),
-                },
-              },
-              {
-                type: "environment.material" as const,
-                sessionID,
-                messageID: lastUser.id,
-                assistantMessageID: msg.id,
-                material: {
-                  kind: "model" as const,
-                  id: `model:${model.providerID}/${model.id}`,
-                  source: { type: "generated" as const, name: "selected-model" },
-                  content: {
-                    providerID: model.providerID,
-                    modelID: model.id,
-                    apiModelID: model.api.id,
-                  },
-                },
-              },
-              {
-                type: "environment.material" as const,
-                sessionID,
-                messageID: lastUser.id,
-                assistantMessageID: msg.id,
-                material: {
-                  kind: "agent" as const,
-                  id: `agent:${agent.name}`,
-                  source: { type: "generated" as const, name: "selected-agent" },
-                  content: {
-                    name: agent.name,
-                    mode: agent.mode,
-                    ...(agent.prompt ? { prompt: agent.prompt } : {}),
-                  },
-                },
-              },
-              ...(mcpInstructions
-                ? [
-                    {
-                      type: "environment.material" as const,
-                      sessionID,
-                      messageID: lastUser.id,
-                      assistantMessageID: msg.id,
-                      material: {
-                        kind: "mcp" as const,
-                        id: "mcp:instructions",
-                        source: { type: "generated" as const, name: "mcp-instructions" },
-                        content: mcpInstructions,
-                      },
-                    },
-                  ]
-                : []),
-              ...(skills
-                ? [
-                    {
-                      type: "environment.material" as const,
-                      sessionID,
-                      messageID: lastUser.id,
-                      assistantMessageID: msg.id,
-                      material: {
-                        kind: "skill" as const,
-                        id: "skill:catalog",
-                        source: { type: "generated" as const, name: "skill-catalog" },
-                        content: skills,
-                      },
-                    },
-                  ]
-                : []),
-            ]
-            yield* Effect.forEach(environment, (item) => Plugin.observe(plugin, item), {
-              discard: true,
-              concurrency: 1,
-            })
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({

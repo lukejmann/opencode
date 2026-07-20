@@ -4,9 +4,6 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Skill } from "../skill"
 import * as Tool from "./tool"
 import DESCRIPTION from "./skill.txt"
-import { Plugin } from "@/plugin"
-import { Observation } from "@/plugin/observation"
-import { InstanceState } from "@/effect/instance-state"
 
 export const Parameters = Schema.Struct({
   name: Schema.String.annotate({ description: "The name of the skill from available_skills" }),
@@ -17,7 +14,6 @@ export const SkillTool = Tool.define(
   Effect.gen(function* () {
     const skill = yield* Skill.Service
     const ripgrep = yield* Ripgrep.Service
-    const plugin = yield* Plugin.Service
 
     return {
       description: DESCRIPTION,
@@ -33,19 +29,6 @@ export const SkillTool = Tool.define(
             patterns: [params.name],
             always: [params.name],
             metadata: {},
-          })
-
-          const instance = yield* InstanceState.context
-          yield* Plugin.observe(plugin, {
-            type: "environment.material",
-            sessionID: ctx.sessionID,
-            messageID: ctx.messageID,
-            material: {
-              kind: "skill",
-              id: `skill:${info.name}`,
-              source: Observation.source(info.location, instance.worktree, instance.directory),
-              content: info.content,
-            },
           })
 
           const dir = path.dirname(info.location)

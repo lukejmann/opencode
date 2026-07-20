@@ -20,8 +20,6 @@ import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { InstanceStore } from "@/project/instance-store"
 import { InstanceBootstrap } from "@/project/bootstrap"
 import { Config } from "@/config/config"
-import { Plugin } from "@/plugin"
-import type { EnvironmentMaterialObservation, Observation } from "@opencode-ai/plugin"
 
 const it = testEffect(
   AppNodeBuilder.build(LayerNode.group([CrossSpawnSpawner.node, LayerNodePlatform.filesystem, InstanceStore.node]), [
@@ -34,37 +32,17 @@ const it = testEffect(
 
 const configLayer = Layer.succeed(Config.Service, TestConfig.make())
 
-const instructionLayer = (
-  global: Partial<Global.Interface>,
-  flags: Partial<RuntimeFlags.Info> = {},
-  plugin?: Layer.Layer<Plugin.Service>,
-) =>
+const instructionLayer = (global: Partial<Global.Interface>, flags: Partial<RuntimeFlags.Info> = {}) =>
   AppNodeBuilder.build(Instruction.node, [
     [Config.node, configLayer],
     [Global.node, Global.layerWith(global)],
     [RuntimeFlags.node, RuntimeFlags.layer(flags)],
-    ...(plugin ? ([[Plugin.node, plugin]] as const) : []),
   ])
 
 const provideInstruction =
-  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>, plugin?: Layer.Layer<Plugin.Service>) =>
+  (global: Partial<Global.Interface>, flags?: Partial<RuntimeFlags.Info>) =>
   <A, E, R>(self: Effect.Effect<A, E, R>) =>
-    self.pipe(Effect.provide(instructionLayer(global, flags, plugin)))
-
-function observationLayer(received: Observation[]) {
-  return Layer.mock(Plugin.Service)({
-    trigger: <Name extends string, Input, Output>(_name: Name, _input: Input, output: Output) => Effect.succeed(output),
-    list: () =>
-      Effect.succeed([
-        {
-          "experimental.observation": async (input: Observation) => {
-            received.push(input)
-          },
-        },
-      ]),
-    init: () => Effect.void,
-  })
-}
+    self.pipe(Effect.provide(instructionLayer(global, flags)))
 
 const write = (filepath: string, content: string) =>
   Effect.gen(function* () {
@@ -232,41 +210,6 @@ describe("Instruction.resolve", () => {
 })
 
 describe("Instruction.system", () => {
-  it.live("observes instruction bytes with sanitized source metadata", () =>
-    Effect.gen(function* () {
-      const globalTmp = yield* tmpWithFiles({ "AGENTS.md": "# Global Instructions" })
-      const projectTmp = yield* tmpWithFiles({ "AGENTS.md": "# Project Instructions" })
-      const received: Observation[] = []
-
-      yield* Effect.gen(function* () {
-        const svc = yield* Instruction.Service
-        yield* svc.system({
-          sessionID: "session-instruction-observation",
-          messageID: MessageID.make("msg_instruction-observation"),
-        })
-      }).pipe(
-        provideInstance(projectTmp),
-        provideInstruction({ home: globalTmp, config: globalTmp }, {}, observationLayer(received)),
-      )
-
-      const materials = received.filter(
-        (item): item is EnvironmentMaterialObservation =>
-          item.type === "environment.material" && item.material.kind === "instruction",
-      )
-      expect(materials).toHaveLength(2)
-      expect(materials.map((item) => item.material.source)).toEqual([
-        { type: "external", name: "AGENTS.md" },
-        { type: "workspace", path: "AGENTS.md" },
-      ])
-      expect(materials.map((item) => item.material.content)).toEqual([
-        "# Global Instructions",
-        "# Project Instructions",
-      ])
-      expect(JSON.stringify(materials)).not.toContain(globalTmp)
-      expect(JSON.stringify(materials)).not.toContain(projectTmp)
-    }),
-  )
-
   it.live("loads both project and global AGENTS.md when both exist", () =>
     Effect.gen(function* () {
       const globalTmp = yield* tmpWithFiles({ "AGENTS.md": "# Global Instructions" })

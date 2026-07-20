@@ -53,55 +53,6 @@ describe("plugin observation", () => {
     expect(Object.isFrozen(received[0].messages)).toBe(true)
   })
 
-  test("redacts absolute paths, URL credentials, and secret-bearing config blocks", () => {
-    expect(Observation.source("/repo/packages/app/AGENTS.md", "/repo")).toEqual({
-      type: "workspace",
-      path: "packages/app/AGENTS.md",
-    })
-    expect(Observation.source("/tmp/project/AGENTS.md", "/", "/tmp/project")).toEqual({
-      type: "workspace",
-      path: "AGENTS.md",
-    })
-    expect(Observation.source("/Users/alice/.config/opencode/AGENTS.md", "/repo")).toEqual({
-      type: "external",
-      name: "AGENTS.md",
-    })
-    expect(Observation.remoteSource("https://user:pass@example.test/rules?token=secret#fragment")).toEqual({
-      type: "remote",
-      url: "https://example.test/rules",
-    })
-
-    const config = Observation.safeConfig({
-      model: "openai/gpt-test",
-      enabled_providers: ["openai"],
-      instructions: ["/Users/alice/private/AGENTS.md"],
-      provider: {
-        openai: {
-          options: { apiKey: "api-key-secret" },
-          headers: { Authorization: "Bearer header-secret" },
-        },
-      },
-      mcp: {
-        docs: {
-          type: "remote",
-          enabled: true,
-          url: "https://example.test/mcp?token=mcp-secret",
-          headers: { Authorization: "Bearer mcp-header-secret" },
-        },
-      },
-      plugin_origins: [{ path: "/Users/alice/private/plugin.ts" }],
-    })
-    expect(config).toEqual({
-      model: "openai/gpt-test",
-      enabled_providers: ["openai"],
-      mcp: { docs: { type: "remote", enabled: true } },
-    })
-    const serialized = JSON.stringify(config)
-    expect(serialized).not.toContain("secret")
-    expect(serialized).not.toContain("/Users/")
-    expect(serialized).not.toContain("Authorization")
-  })
-
   test("captures resolved tool schemas without execute functions or request credentials", () => {
     const request = Observation.providerRequest({
       sessionID: "session-1",

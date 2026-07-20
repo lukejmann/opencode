@@ -1,30 +1,9 @@
 /**
  * Read-only runtime facts emitted at boundaries where OpenCode owns the exact
- * request, environment material, or lineage transition. Observation hooks may
- * copy these values, but cannot change OpenCode execution. Source metadata is
- * sanitized; provider-visible content remains verbatim by design.
+ * request or lineage transition. Observation hooks may copy these values, but
+ * cannot change OpenCode execution. Provider-visible content remains verbatim
+ * by design.
  */
-
-export type ObservationSource =
-  | {
-      readonly type: "workspace"
-      /** POSIX-style path relative to the workspace root. */
-      readonly path: string
-    }
-  | {
-      readonly type: "external"
-      /** A non-sensitive display name. Absolute host paths are never exposed. */
-      readonly name: string
-    }
-  | {
-      readonly type: "remote"
-      /** URL with credentials, query, and fragment removed. */
-      readonly url: string
-    }
-  | {
-      readonly type: "generated"
-      readonly name: string
-    }
 
 export type ProviderRequestTool = {
   readonly name: string
@@ -75,22 +54,6 @@ export type ProviderResponseObservation = {
   }
 }
 
-export type EnvironmentMaterialKind = "configuration" | "instruction" | "skill" | "mcp" | "model" | "agent"
-
-export type EnvironmentMaterialObservation = {
-  readonly type: "environment.material"
-  readonly sessionID?: string
-  readonly messageID?: string
-  readonly assistantMessageID?: string
-  readonly material: {
-    readonly kind: EnvironmentMaterialKind
-    /** Stable, human-readable identity. This is not a content hash. */
-    readonly id: string
-    readonly source?: ObservationSource
-    readonly content: unknown
-  }
-}
-
 export type CompactionObservation = {
   readonly type: "session.compaction"
   readonly phase: "started" | "completed" | "failed"
@@ -121,6 +84,5 @@ export type SubagentObservation = {
 export type Observation =
   | ProviderRequestObservation
   | ProviderResponseObservation
-  | EnvironmentMaterialObservation
   | CompactionObservation
   | SubagentObservation
